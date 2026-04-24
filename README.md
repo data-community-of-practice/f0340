@@ -1,113 +1,182 @@
 # f0340
-BDBSF Initial Papers citation
-# Citation Count Fetcher
+# Connect Grants to Publications and Researchers
 
-A Python script that fetches the number of citations for each publication in your dataset using DOIs. Uses OpenAlex as the primary source with Crossref as a fallback.
+A Python script that uses the publications Excel file as a bridge to produce the final two relationship tables of the pipeline graph: one linking grants directly to publication DOIs, and one linking grants to researcher UUIDs (inferred through co-authorship).
+
+No API calls required — pure data joining.
+
+## Pipeline context
+
+f0340 is the last relationship-building step. It takes outputs from across the pipeline and produces the two edge tables needed to complete the grant-centred graph.
+
+```
+publications.xlsx  ──────────────────────────────────────────┐
+                                                             │
+f0339  →  Grants.json                                        │
+                                                             ├──  f0340
+f0338  →  Researchers.json                                   │
+          Researcher_Publication.json  ───────────────────────┘
+```
+
+### Complete graph after f0340
+
+| File | Type | Description |
+|------|------|-------------|
+| `Grants.json` | Node | Grant metadata (f0339) |
+| `Researchers.json` | Node | Researcher identity (f0338) |
+| `Organisations.json` | Node | Organisation metadata (f0337) |
+| `Grant_Publication.json` | Edge | Grant → Publication DOI |
+| `Grant_Researcher.json` | Edge | Grant → Researcher |
+| `Researcher_Publication.json` | Edge | Researcher → Publication DOI (f0338) |
+| `Researcher_Organisation.json` | Edge | Researcher → Organisation (f0337) |
 
 ## How it works
 
-### Phase 1 — OpenAlex (primary, batched)
-Queries OpenAlex in batches of 50 DOIs per request using the filter pipe syntax. OpenAlex aggregates citation data from Crossref, PubMed, Microsoft Academic Graph, and other sources, giving it broader coverage than any single source. Returns `cited_by_count` for each work.
+**Grant_Publication links** are read directly from the publications Excel file. Every row with both a `Grant_ID` and a `Publication_DOI` becomes one link. Duplicate pairs are deduplicated.
 
-### Phase 2 — Crossref (fallback)
-For DOIs not found in OpenAlex, queries the Crossref API individually and extracts `is-referenced-by-count`. Crossref counts tend to be lower since they only track citations from other Crossref-registered DOIs, but this ensures maximum coverage.
+**Grant_Researcher links** are derived by joining: a researcher is linked to a grant if they authored at least one publication that is linked to that grant.
+
+```
+Grant_ID → Publication_DOI        (from publications Excel)
+Publication_DOI → Researcher_ID   (from Researcher_Publication.json)
+─────────────────────────────────
+Grant_ID → Researcher_ID          (inferred)
+```
+
+This means a researcher may be connected to a grant they were not originally listed on — for example, a co-author who contributed to a grant-funded paper. All connections are traceable through the intermediate DOI.
+
+## Inputs
+
+Three inputs are required:
+
+| Argument | File | Description |
+|----------|------|-------------|
+| `publications_xlsx` | `Publications_with_high_confidence.xlsx` | The original publications Excel. Must contain `Grant_ID` and `Publication_DOI` columns. Same file used by f0334 and f0339. |
+| `researchers_json` | `Researchers.json` | Researcher identity nodes from f0338. Used for name display in the console summary. |
+| `researcher_pub_json` | `Researcher_Publication.json` | Researcher-to-publication relationships from f0338. Used to infer grant-researcher links. |
+
+### Required columns in the publications file
+
+| Column | Description |
+|--------|-------------|
+| `Grant_ID` | Grant identifier. Matched against grant records. |
+| `Publication_DOI` | Publication DOI. Used as the join key to researchers. |
+
+## Outputs
+
+| File | Description |
+|------|-------------|
+| `Grant_Publication.json` | One record per unique grant-DOI pair. |
+| `Grant_Researcher.json` | One record per unique grant-researcher pair. |
+
+### Grant_Publication record
+
+```json
+{
+  "grant_id": "12345678",
+  "publication_doi": "10.1111/example.001"
+}
+```
+
+### Grant_Researcher record
+
+```json
+{
+  "grant_id": "12345678",
+  "researcher_id": "3f2a1b4c-..."
+}
+```
+
+Both files contain one record per unique pair. A grant linked to ten publications generates ten records in `Grant_Publication.json`. A grant whose publications were co-authored by fifteen researchers generates fifteen records in `Grant_Researcher.json`.
 
 ## Requirements
 
 - Python 3.7+
-- Libraries: `openpyxl`, `requests`
+- Library: `openpyxl`
 
 ```bash
-pip install openpyxl requests
+pip install openpyxl
 ```
-
-## Setup
-
-Same `config.ini` as the other scripts:
-
-```ini
-[crossref]
-email = yourname@example.com
-delay = 1
-save_every = 50
-max_retries = 3
-```
-
-No API key required — both OpenAlex and Crossref are free.
-
-## Input file format
-
-Any Excel file with a `Publication_DOI` column. This is typically your original input file or the output of `crossref_author_fetch.py`.
 
 ## Usage
 
-### From a terminal
+All three inputs are required positional arguments:
 
 ```bash
-python fetch_citations.py Publications_with_high_confidence.xlsx
+python f0340.py publications.xlsx Researchers.json Researcher_Publication.json
 ```
 
-### From Spyder
+Outputs are written to the same directory as the publications file by default. Use `--output-dir` to change this:
+
+```bash
+python f0340.py publications.xlsx Researchers.json Researcher_Publication.json --output-dir ./output/
+```
+
+### All options
+
+| Option | Description |
+|--------|-------------|
+| `publications_xlsx` | Path to the publications Excel file. |
+| `researchers_json` | Path to `Researchers.json` (from f0338). |
+| `researcher_pub_json` | Path to `Researcher_Publication.json` (from f0338). |
+| `--output-dir`, `-o` | Directory for output files (default: same as publications file). |
+
+### From Spyder or Jupyter
 
 ```python
-!python "E:\your\folder\fetch_citations.py" "E:\your\folder\Publications_with_high_confidence.xlsx"
+!python "E:\your\folder\f0340.py" "E:\your\folder\publications.xlsx" "E:\your\folder\Researchers.json" "E:\your\folder\Researcher_Publication.json"
 ```
 
-## Output
-
-The script adds two columns to a copy of your input file (`<input>_with_citations.xlsx`):
-
-| Column | Description |
-|---|---|
-| `Citation_Count` | Total number of citations for this publication |
-| `Citation_Source` | Where the count came from: `OpenAlex`, `Crossref`, or `Not found` |
-
-Duplicate DOIs (same publication appearing on multiple rows) receive identical citation counts.
-
-The script also prints a summary including total citations and the top 10 most cited papers.
-
-## Performance
-
-OpenAlex batching makes this script efficient — 500 DOIs can be fetched in around 10 batch requests (roughly 10–20 seconds), compared to 500 individual requests for other APIs. Crossref fallback is only used for the small number of DOIs missing from OpenAlex.
-
-## Cache and resumability
-
-The script creates a `<input>_citation_cache.json` file. Re-running skips previously fetched DOIs. Delete the cache to force a full refresh (useful if you want updated citation counts months later).
-
-## Pipeline context
-
-This script can be run independently at any point — it only needs the `Publication_DOI` column. It's designed to run on your original input file:
+## Console output
 
 ```
-python fetch_citations.py Publications_with_high_confidence.xlsx
-```
+Publications xlsx:       /path/to/Publications_with_high_confidence.xlsx
+Researchers json:        /path/to/Researchers.json
+Researcher-Pub json:     /path/to/Researcher_Publication.json
+Output dir:              /path/to/
 
-It complements the main pipeline:
+Grant-Publication links:  1243
+Researcher-Pub links:     8432
+Researchers:              2075
 
-```
-1. python crossref_author_fetch.py       → author names
-2. python extract_unique_authors.py       → unique authors
-3. python fetch_affiliations.py           → affiliations
-4. python extract_unique_orgs.py          → unique organisations
-5. python classify_orgs.py                → classification
-6. python geotag_orgs.py                  → geolocation + map
-7. python fetch_citations.py              → citation counts
+=======================================================
+GRANT CONNECTION SUMMARY
+=======================================================
+Grant_Publication.json:
+  Links:              1243
+  Unique grants:      387
+  Unique DOIs:        412
+Grant_Researcher.json:
+  Links:              5891
+  Unique grants:      387
+  Unique researchers: 2048
+=======================================================
+
+Sample grant-researcher links:
+  Grant 12345678: Jane Doe, John Smith, Wei Zhang, Alex Brown, Sarah Connor
+  Grant 87654321: Maria Garcia, James Wilson
+  ...
+
+Saved:
+  /path/to/Grant_Publication.json
+  /path/to/Grant_Researcher.json
 ```
 
 ## Troubleshooting
 
 | Problem | Solution |
-|---|---|
-| `Citation_Count` shows `N/A` | The DOI wasn't found in either OpenAlex or Crossref. It may be invalid, very new, or from a publisher not indexed by either service. |
-| Low citation counts | This is expected for recent publications. Citation counts are cumulative and grow over time. |
-| Counts differ from Google Scholar | Google Scholar typically reports higher counts because it indexes non-DOI sources like theses, books, and preprints. OpenAlex and Crossref only count DOI-registered citations. |
-| Want updated counts | Delete the `_citation_cache.json` file and re-run. Citation counts change over time as new papers cite existing ones. |
+|---------|----------|
+| `ERROR: Need 'Grant_ID' and 'Publication_DOI' columns` | The publications file must have both columns with these exact names. The error message lists what columns were actually found. |
+| `ERROR: Researchers json not found` | Check the path to `Researchers.json`. This file is produced by f0338. |
+| `ERROR: Researcher_Publication json not found` | Check the path to `Researcher_Publication.json`. This file is produced by f0338. |
+| Fewer Grant_Researcher links than expected | A grant-researcher link is only created when a researcher from `Researcher_Publication.json` authored a DOI that appears in the publications Excel for that grant. Researchers not in the pipeline (e.g. with no Crossref metadata) will not appear. |
+| Grant_Researcher links seem too many | Expected — every co-author on every grant-funded publication is linked to the grant. A multi-author paper on a single grant generates one link per co-author. |
 
 ## Limitations
 
-- **Citation counts are point-in-time snapshots.** They reflect the count at the time of fetching and will increase as new papers cite the work.
-- **OpenAlex vs Crossref counts may differ.** OpenAlex typically reports higher counts because it aggregates multiple sources. The `Citation_Source` column tells you which was used.
-- **Very new publications** (published in the last few months) may show 0 citations even if they've been cited, due to indexing delays.
+- **Co-authorship inference**: Grant_Researcher links are inferred via publication co-authorship, not from the original grant participant list. A co-author who was not a named grant investigator will still appear as linked to the grant if they published a paper funded by it. For named-investigator-only links, use `participant_list` from `Grants.json` (produced by f0339) instead.
+- **DOI as join key**: the join between grants and researchers uses DOI as the bridge. Publications without a DOI in the Excel file, or researchers whose publications were not indexed by Crossref, will not appear in the output.
+- **First active worksheet only**: the script reads the first worksheet in the publications Excel file.
 
 ## License
 
